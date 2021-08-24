@@ -1,0 +1,65 @@
+<html>
+  <head>
+    <meta content="text/html;charset=utf-8" http-equiv="Content-Type"/>
+    <style>
+        textarea {
+            width: 45%;
+            height: 20em;
+        }
+    </style>
+  </head>
+  <body>
+    <!-- Note the usage of `type=module` here as this is an ES6 module -->
+    <script type="module">
+      import init, { N3Formula } from './pkg/namur_wasm.js';
+
+      async function run() {
+
+        const parse = document.getElementById('parse');
+        const reason = document.getElementById('reason');
+        const src = document.getElementById('src');
+        const out = document.getElementById('out');
+
+        parse.disabled = true;
+        reason.disabled = true;
+
+        await init();
+
+        parse.disabled = false;
+        reason.disabled = false;
+
+        parse.addEventListener('click', (evt) => {
+            try {
+                let formula = new N3Formula(src.value);
+                out.value = formula.serialize();
+            }
+            catch(e) {
+                alert(e);
+            }
+        });
+        reason.addEventListener('click', (evt) => {
+            try {
+                let formula = new N3Formula(src.value);
+                out.value = formula.think();
+            }
+            catch(e) {
+                alert(e);
+            }
+        });
+      }
+
+      run();
+    </script>
+    <h1>Namur, a.k.a. N3R: a Notation3 Reasoner</h1>
+    <p>(well, a very incomplete, quick and dirty one, at the moment)</p>
+    <div>
+        <button id="parse">Parse</button>
+        <button id="reason">Reason</button>
+        </div>
+    <textarea id="src" placeholder="N3 source"></textarea>
+    <textarea id="out" placeholder="N3 output"></textarea>
+    <p>One important limitation of the current parser is that it requires a whitespace after all prefixed names.
+        So the following is not recognized: <pre>:a :b :c, :d.</pre> Instead, it must be written: <pre>:a :b :c , :d .</pre>
+    </p>
+  </body>
+</html>

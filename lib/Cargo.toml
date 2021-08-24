@@ -1,0 +1,23 @@
+[package]
+name = "namur"
+version = "0.1.0"
+edition = "2018"
+authors = ["Pierre-Antoine Champin <pierre-antoine@w3.org>"]
+description = "Namur, a.k.a. N3R, a Notation 3 reasoner"
+repository = "https://github.com/pchampin/namur"
+readme = "../README.md"
+license = "CECILL-B"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lazy_static = "1.4.0"
+mownstr = "0.1.1"
+oxilangtag = "0.1.1"
+regex = "1.5.4"
+sophia_iri = { version="0.7.0", path="../../sophia_rs/iri" }
+sophia_api = { version="0.7.0", path="../../sophia_rs/api" }
+sophia = "0.7.0"
+
+[dev-dependencies]
+test-case = "1.2.0"
