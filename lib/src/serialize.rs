@@ -264,7 +264,7 @@ fn do_serialize_iri<W: io::Write, P: PrefixMap + ?Sized>(
 ) -> io::Result<()> {
     // TODO remove spurious space after prefixed name once the parser supports itc
     match prefixes.get_prefixed_pair(iri) {
-        Some((pr, sf)) => write!(w, "{}:{} ", &pr[..], sf),
+        Some((pr, sf)) => write!(w, "{}:{}", &pr[..], sf),
         None => write!(w, "<{}>", &iri[..]),
     }
 }

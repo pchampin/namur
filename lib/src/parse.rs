@@ -194,7 +194,7 @@ impl<'a> Parser<'a> {
             }
             [b'?', ..] => {
                 self.forward("?");
-                let name = self.parse_till_ws();
+                let name = self.parse_suffix();
                 LocalId::new(name)
                     .map_err(|e| self.err(e))
                     .map(|n| self.quickvar_to_term(n))
@@ -227,7 +227,7 @@ impl<'a> Parser<'a> {
             }
             [b'_', b':', ..] => {
                 self.forward("_:");
-                let name = self.parse_till_ws();
+                let name = self.parse_suffix();
                 LocalId::new(name)
                     .map_err(|e| self.err(e))
                     .map(|n| self.bnode_to_term(n))
@@ -278,7 +278,7 @@ impl<'a> Parser<'a> {
 
     fn parse_var_label(&mut self, prefix: &str) -> ParseResult<VarLabel> {
         if self.try_consume_str(prefix) {
-            let label = self.parse_till_ws();
+            let label = self.parse_suffix();
             LocalId::new(label)
                 .map_err(|e| self.err(e))
                 .map(VarLabel::from)
@@ -314,9 +314,7 @@ impl<'a> Parser<'a> {
             .find_map(|(p, ns)| (p[..] == pr[..]).then(|| ns))
             .ok_or_else(|| self.err(format!("Unknown prefix {:?}", &pr[..])))?;
         let mut iri = ns.to_string();
-        // TODO improve the following; actually, pname suffix can also end with other charaters:
-        // '}', '[', ']{, '(', ')', ';', ',', '.' in certain conditions... and probably others
-        let sf = self.parse_till_ws();
+        let sf = self.parse_suffix();
         iri.push_str(sf);
         Iri::new(iri).map_err(|e| self.err(e))
     }
@@ -328,10 +326,23 @@ impl<'a> Parser<'a> {
         Prefix::new(&buf[..c]).map_err(|e| self.err(e))
     }
 
-    fn parse_till_ws(&mut self) -> &'a str {
+    fn parse_suffix(&mut self) -> &'a str {
         let buf = self.txt;
-        let c = self.consume_while(|c| !c.is_ascii_whitespace());
-        &buf[..c]
+        let mut n = 0;
+        loop {
+            match self.txt.as_bytes() {
+                [] => break,
+                [b'.'] => break,
+                [c, ..] if !suffix_char(*c) => break,
+                [b'.', c, ..] if !suffix_char(*c) => break,
+                _ => {
+                    n += 1;
+                    self.txt = &self.txt[1..];
+                }
+            }
+        }
+        self.column += n;
+        &buf[..n]
     }
 
     fn expect<F>(&mut self, mut predicate: F) -> ParseResult
@@ -549,6 +560,11 @@ impl<'a> Parser<'a> {
     }
 }
 
+// NB: this not an exact
+fn suffix_char(c: u8) -> bool {
+    !(c.is_ascii_whitespace() || b"{}()[]<>,;-+\"".contains(&c))
+}
+
 // FormulaDraft
 
 #[derive(Clone, Debug, Default)]
@@ -603,14 +619,14 @@ mod test {
             PREFIX a: <>
             @prefix b: <../b/>.
 
-            @forSome :ppl1 , :ppl2 .
+            @forSome :ppl1, :ppl2.
 
-            a:alice a b:Person , b:Woman ;
+            a:alice a b:Person, b:Woman;
               # an intermediate comment
-              b:likes ( a:bob :ppl1 :ppl2 true ) .
-            # a:this_triple a:will_be a:ignore .
+              b:likes (a:bob.: :ppl1 :ppl2 true).
+            # a:this_triple a:will_be a:ignore.
             
-            { ?x a :Person } => { ?x :mother _:mother }
+            {?x a :Person} => {?x :mother _:mother}.
         ",
             Default::default(),
         )?;
@@ -639,7 +655,7 @@ mod test {
         assert_eq!(
             &triples[2][2],
             &vec![
-                Iri::new("http://my.example/a/bob")?.into(),
+                Iri::new("http://my.example/a/bob.:")?.into(),
                 Term::Variable(0),
                 Term::Variable(1),
                 Literal::Boolean(true).into(),
