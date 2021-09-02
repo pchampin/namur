@@ -219,12 +219,8 @@ impl<'a> Parser<'a> {
                 self.expect(|c| c == '}')?;
                 Ok(f.into())
             }
-            [b'+', ..] | [b'-', ..] | [b'.', ..] => {
-                todo!("parse integers and float")
-            }
-            [c, ..] if c.is_ascii_digit() => {
-                todo!("parse integers and float")
-            }
+            [b'+' | b'-' | b'.', ..] => self.parse_number().map(Term::from),
+            [c, ..] if c.is_ascii_digit() => self.parse_number().map(Term::from),
             [b'_', b':', ..] => {
                 self.forward("_:");
                 let name = self.parse_suffix();
@@ -299,9 +295,9 @@ impl<'a> Parser<'a> {
     fn parse_iriref(&mut self) -> ParseResult<&'a str> {
         self.expect(|c| c == '<')?;
         let buf = self.txt;
-        let c = self.consume_while(|c| c != '>' && !c.is_ascii_whitespace());
+        let len = self.consume_while(|c| c != '>' && !c.is_ascii_whitespace());
         self.expect(|c| c == '>')?;
-        Ok(&buf[..c])
+        Ok(&buf[..len])
     }
 
     fn parse_pname(&mut self) -> ParseResult<Iri> {
@@ -321,28 +317,31 @@ impl<'a> Parser<'a> {
 
     fn parse_prefix(&mut self) -> ParseResult<Prefix<'a>> {
         let buf = self.txt;
-        let c = self.consume_while(|c| c != ':' && !c.is_ascii_whitespace());
+        let len = self.consume_while(|c| c != ':' && !c.is_ascii_whitespace());
         self.expect(|c| c == ':')?;
-        Prefix::new(&buf[..c]).map_err(|e| self.err(e))
+        Prefix::new(&buf[..len]).map_err(|e| self.err(e))
     }
 
     fn parse_suffix(&mut self) -> &'a str {
         let buf = self.txt;
-        let mut n = 0;
         loop {
             match self.txt.as_bytes() {
                 [] => break,
                 [b'.'] => break,
-                [c, ..] if !suffix_char(*c) => break,
                 [b'.', c, ..] if !suffix_char(*c) => break,
+                [c, ..] if !suffix_char(*c) => break,
                 _ => {
-                    n += 1;
                     self.txt = &self.txt[1..];
                 }
             }
         }
-        self.column += n;
-        &buf[..n]
+        let len = self.txt.as_ptr() as usize - buf.as_ptr() as usize;
+        self.column += len;
+        &buf[..len]
+    }
+
+    fn parse_number(&mut self) -> ParseResult<Literal> {
+        todo!()
     }
 
     fn expect<F>(&mut self, mut predicate: F) -> ParseResult
@@ -359,15 +358,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    #[inline]
     fn consume_while<F>(&mut self, mut predicate: F) -> usize
     where
         F: FnMut(char) -> bool,
     {
-        let mut count = 0;
-        while self.try_consume(&mut predicate) {
-            count += 1;
-        }
-        count
+        let buf = self.txt.as_ptr() as usize;
+        while self.try_consume(&mut predicate) {}
+        self.txt.as_ptr() as usize - buf
     }
 
     #[inline]
