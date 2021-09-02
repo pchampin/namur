@@ -50,7 +50,7 @@ struct Parser<'a> {
     drafts: Vec<FormulaDraft>,
     next_var: usize,
     var_labels: HashSet<VarLabel>,
-    term_stack: Vec<Term>,
+    term_stack: Vec<(Term, bool)>,
 }
 
 impl<'a> Parser<'a> {
@@ -161,28 +161,41 @@ impl<'a> Parser<'a> {
 
     fn parse_triples(&mut self) -> ParseResult {
         let s = self.parse_term()?;
-        self.term_stack.push(s);
+        self.term_stack.push((s, false));
         self.parse_predicate_object_list()
     }
 
-    fn parse_predicate(&mut self) -> ParseResult<Term> {
+    fn parse_predicate(&mut self) -> ParseResult<(Term, bool)> {
         match self.txt.as_bytes() {
             [b'a', ws, ..] if ws.is_ascii_whitespace() => {
                 self.txt = &self.txt[1..];
                 self.column += 1;
-                Ok(rdf::type_.into())
+                Ok((rdf::type_.into(), false))
             }
-            [b'=', b'>', ws, ..] if ws.is_ascii_whitespace() => {
+            [b'=', b'>', ..] => {
                 self.txt = &self.txt[2..];
                 self.column += 2;
-                Ok(log::implies.into())
+                Ok((log::implies.into(), false))
             }
-            [b'<', b'=', ws, ..] if ws.is_ascii_whitespace() => {
+            [b'<', b'=', ..] => {
                 self.txt = &self.txt[2..];
                 self.column += 2;
-                todo!("predicate <=")
+                Ok((log::implies.into(), true))
             }
-            _ => self.parse_term(),
+            [b'i', b's', ws, ..] | [b'@', b'i', b's', ws, ..] if ws.is_ascii_whitespace() => {
+                self.try_consume_str("@");
+                self.forward("is");
+                self.ws();
+                let p = self.parse_term()?;
+                self.ws();
+                match self.txt.as_bytes() {
+                    [b'o', b'f', ws, ..] if ws.is_ascii_whitespace() => self.forward("of"),
+                    [b'@', b'o', b'f', ws, ..] if ws.is_ascii_whitespace() => self.forward("@of"),
+                    _ => return Err(self.err("expected 'of'")),
+                }
+                Ok((p, true))
+            }
+            _ => self.parse_term().map(|t| (t, false)),
         }
     }
 
@@ -243,25 +256,25 @@ impl<'a> Parser<'a> {
     fn parse_predicate_object_list(&mut self) -> ParseResult {
         'p: loop {
             self.ws();
-            let p = self.parse_predicate()?;
-            self.term_stack.push(p);
+            let pred_dir = self.parse_predicate()?;
+            self.term_stack.push(pred_dir);
             loop {
                 self.ws();
                 let o = self.parse_term()?;
                 self.ws();
                 if self.try_consume(|c| c == ',') {
-                    let p = self.term_stack.last().unwrap().clone();
-                    let s = self.term_stack[self.term_stack.len() - 2].clone();
-                    self.push_triple(s, p, o);
+                    let (p, rev) = self.term_stack.last().unwrap().clone();
+                    let (s, _) = self.term_stack[self.term_stack.len() - 2].clone();
+                    self.push_triple(s, p, o, rev);
                 } else if self.try_consume(|c| c == ';') {
-                    let p = self.term_stack.pop().unwrap();
-                    let s = self.term_stack.last().unwrap().clone();
-                    self.push_triple(s, p, o);
+                    let (p, rev) = self.term_stack.pop().unwrap();
+                    let (s, _) = self.term_stack.last().unwrap().clone();
+                    self.push_triple(s, p, o, rev);
                     continue 'p;
                 } else {
-                    let p = self.term_stack.pop().unwrap();
-                    let s = self.term_stack.pop().unwrap();
-                    self.push_triple(s, p, o);
+                    let (p, rev) = self.term_stack.pop().unwrap();
+                    let (s, _) = self.term_stack.pop().unwrap();
+                    self.push_triple(s, p, o, rev);
                     match self.txt.as_bytes().first() {
                         None | Some(b']') | Some(b'}') => (),
                         _ => self.expect(|c| c == '.')?,
@@ -553,14 +566,18 @@ impl<'a> Parser<'a> {
         Term::Variable(id)
     }
 
-    fn push_triple(&mut self, s: Term, p: Term, o: Term) {
-        self.drafts.last_mut().unwrap().triples.push([s, p, o])
+    fn push_triple(&mut self, s: Term, p: Term, o: Term, reverse: bool) {
+        self.drafts
+            .last_mut()
+            .unwrap()
+            .triples
+            .push(if reverse { [o, p, s] } else { [s, p, o] });
     }
 }
 
 // NB: this not an exact
 fn suffix_char(c: u8) -> bool {
-    !(c.is_ascii_whitespace() || b"{}()[]<>,;-+\"".contains(&c))
+    !(c.is_ascii_whitespace() || b"\"()+,-;<=>[]{}".contains(&c))
 }
 
 // FormulaDraft
@@ -621,15 +638,16 @@ mod test {
 
             a:alice a b:Person, b:Woman;
               # an intermediate comment
-              b:likes (a:bob.: :ppl1 :ppl2 true).
+              b:likes (a:bob.: :ppl1 :ppl2 true) ;
+              is b:mother of a:bob.
             # a:this_triple a:will_be a:ignore.
             
-            {?x a :Person} => {?x :mother _:mother}.
+            {?x :mother _:mother} <= {?x a :Person}.
         ",
             Default::default(),
         )?;
         let triples = f.triples();
-        assert_eq!(triples.len(), 4);
+        assert_eq!(triples.len(), 5);
         assert_eq!(triples[0][0], Iri::new("http://my.example/a/alice")?.into());
         assert_eq!(&triples[0][1], &rdf::type_.into());
         assert_eq!(
@@ -661,9 +679,18 @@ mod test {
             ]
             .into()
         );
-        assert!(matches!(&triples[3][0], Term::Formula(f) if f.triples().len() == 1));
-        assert_eq!(&triples[3][1], &log::implies.into());
-        assert!(matches!(&triples[3][2], Term::Formula(f) if f.triples().len() == 1));
+        assert_eq!(&triples[3][0], &Iri::new("http://my.example/a/bob")?.into());
+        assert_eq!(
+            &triples[3][1],
+            &Iri::new("http://my.example/b/mother")?.into()
+        );
+        assert_eq!(
+            &triples[3][2],
+            &Iri::new("http://my.example/a/alice")?.into()
+        );
+        assert!(matches!(&triples[4][0], Term::Formula(f) if f.triples().len() == 1));
+        assert_eq!(&triples[4][1], &log::implies.into());
+        assert!(matches!(&triples[4][2], Term::Formula(f) if f.triples().len() == 1));
         Ok(())
     }
 
