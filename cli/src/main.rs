@@ -42,11 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .author("Pierre-Antoine Champin <http://champin.net/>")
         .about("A Notation3 Reasoner")
         .arg(
-            Arg::with_name("think")
-                .short("t")
+            Arg::new("think")
+                .short('t')
                 .long("think")
-                .multiple(true)
-                .help("Computes one step of forward-chaining reasoning, and output resultys"),
+                .multiple_occurrences(true)
+                .help("Computes one step of forward-chaining reasoning, and output results"),
         )
         .get_matches();
 

@@ -1,345 +1,225 @@
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)] // TODO remove this enventually
+
 use super::*;
-use std::convert::Infallible;
-use Term::Variable;
+use std::collections::HashMap;
 
-/// TODO document
-///
-/// the callback is called for each bindings that unifies f1 with f2;
-/// the returned value of the callback indicates whether further bindings should be searched or not
-pub fn unify_with<F>(f1: &Formula, f2: &Formula, context: Option<&Formula>, mut callback: F)
+#[derive(Clone, Debug, Default)]
+pub struct Bindings<'a> {
+    parent: Option<Arc<Bindings<'a>>>,
+    map: HashMap<&'a str, &'a Term>,
+}
+
+impl<'a> Bindings<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn freeze(self) -> Arc<Self> {
+        Arc::new(self)
+    }
+
+    pub fn spawn(self: &Arc<Self>) -> Self {
+        Bindings {
+            parent: Some(Arc::clone(self)),
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn get(&self, variable: &str) -> Option<&Term> {
+        self.map
+            .get(variable)
+            .copied()
+            .or_else(|| self.parent.as_ref().and_then(|p| p.get(variable)))
+    }
+
+    pub fn set(&mut self, variable: &'a str, term: &'a Term) {
+        self.map.insert(variable, term);
+    }
+
+    pub fn bind_formula(&self, f: &Formula) -> Formula {
+        let compiled = self.compile(f.for_all(), f.for_some());
+        let triples = f.triples().iter().map(|t| self.bind_triple(t)).collect();
+        Formula::new(f.for_all().to_vec(), f.for_some().to_vec(), triples)
+    }
+
+    pub fn bind_triple(&self, t: &[Term; 3]) -> [Term; 3] {
+        [
+            self.bind_term(&t[0]),
+            self.bind_term(&t[1]),
+            self.bind_term(&t[2]),
+        ]
+    }
+
+    pub fn bind_term(&self, t: &Term) -> Term {
+        use Term::*;
+        match t {
+            Variable(vid) => match self.get(vid.as_str()) {
+                Some(t) => t.clone(),
+                None => Variable(vid.clone()),
+            },
+            List(v) => List(v.iter().map(|t| self.bind_term(t)).collect()),
+            Formula(f) => Formula(self.bind_formula(f)),
+            _ => t.clone(),
+        }
+    }
+
+    fn compile(&self, exclude1: &[Variable], exclude2: &[Variable]) -> Bindings {
+        let mut compiled = match self.parent.as_ref() {
+            None => Bindings::new(),
+            Some(p) => p.compile(exclude1, exclude2),
+        };
+        for (name, term) in self.map.iter() {
+            if exclude1
+                .iter()
+                .chain(exclude2.iter())
+                .any(|v| v.as_str() == *name)
+            {
+                continue;
+            }
+            compiled.map.insert(*name, *term);
+        }
+        compiled
+    }
+}
+
+/// Tries to unify the two slice of terms (triple or lists) at the top of the stack.
+/// On success, return `Total` after popping the top of the stack.
+/// On failure, return `Fail` (the stack can be dropped).
+/// On partial success (i.e. when encountering quoted graphs that require a backtracker),
+/// return `Partial`, and the stack should be kept for recovering.
+pub fn unify<'a, F1, F2>(
+    stack: &mut Vec<UnificationFrame<'a>>,
+    bindable: &F1,
+    kb_universal: &F2,
+    bindings: &mut Bindings<'a>,
+) -> UnificationResult
 where
-    F: FnMut(&[(usize, &Term)]) -> bool,
+    F1: Fn(&LocalId) -> bool,
+    F2: Fn(&LocalId) -> bool,
 {
-    if f1.for_all().len() > f2.for_all().len() {
-        return;
-    }
-    let mut bindable = vec![];
-    let mut bindings = vec![];
-    let stash1: Vec<_>;
-    if let Some(context) = context {
-        // outer existentials are considered as constants
-        stash1 = context
-            .for_some()
-            .iter()
-            .map(|(vid, _)| (*vid, Variable(*vid)))
-            .collect();
-        for (vid, var) in &stash1 {
-            bindings.push((*vid, var));
-        }
-        // outer univerals are bindable by unification
-        for (vid, _) in context.for_all() {
-            bindable.push(*vid);
-        }
-    }
-    // inner existentials are bindable by unification
-    for (vid, _) in f1.for_some() {
-        bindable.push(*vid);
-    }
-    let mut ctx = Context::new(bindable, bindings);
-    let cp = ctx.checkpoint();
+    use Term::*;
+    use UnificationResult::*;
 
-    // inner universals should unify to inner universals of the target formula
-    let uni1: Vec<_> = f1.for_all().iter().map(|(vid, _)| *vid).collect();
-    let uni2: Vec<_> = f2.for_all().iter().map(|(vid, _)| Variable(*vid)).collect();
-    utils::mappings(&uni1, &uni2, |mapping| -> Result<(), Infallible> {
-        for (vid, var) in mapping {
-            ctx.bindings.push((**vid, var));
-        }
-        ctx.unify_triples_with(f1.triples(), f2.triples(), &mut callback);
-        ctx.rollback(cp);
-        Ok(())
-    })
-    .unwrap();
-}
-
-pub struct Context<'a> {
-    /// list of variables that can be bound by unification
-    bindable: Vec<usize>,
-    /// list of current bindings
-    /// NB: this list can contain variables that are not in `self.bindable`;
-    /// this happens when unifying subformulae, to map quantified variables of both
-    bindings: Vec<(usize, &'a Term)>,
-}
-
-impl<'a> Context<'a> {
-    fn new(bindable: Vec<usize>, bindings: Vec<(usize, &'a Term)>) -> Context<'a> {
-        Context { bindable, bindings }
-    }
-
-    /// Tries to unify every triple from t1 wih t2 in this context,
-    /// updating them if necessary.
-    /// For each successful unification, call `callback` with the given mapping.
-    ///
-    /// May result to Ok(true), Ok(false), or Err(()) in case the unification must be deferred.
-    #[allow(clippy::result_unit_err)]
-    pub fn unify_triples_with<F>(
-        &mut self,
-        triples1: &'a [[Term; 3]],
-        triples2: &'a [[Term; 3]],
-        callback: &mut F,
-    ) where
-        F: FnMut(&[(usize, &Term)]) -> bool,
-    {
-        // TODO maybe change the signature to accept formulae instead of triple vecs,
-        // and do the right thing with their bindings here?
-        let triples1: Vec<_> = triples1.iter().collect();
-        let mut deferred = vec![];
-        self.unify_triples_rec(
-            &triples1,
-            triples2,
-            callback,
-            self.checkpoint(),
-            &mut deferred,
-        );
-    }
-
-    /// Tries to unify every triple from t1 wih t2 in this context,
-    /// updating them if necessary.
-    ///
-    /// May result to Ok(true), Ok(false), or Err(()) in case the unification must be deferred.
-    #[allow(clippy::result_unit_err)]
-    fn unify_triples_rec<F>(
-        &mut self,
-        triples1: &[&'a [Term; 3]],
-        triples2: &'a [[Term; 3]],
-        callback: &mut F,
-        checkpoint: usize,
-        deferred: &mut Vec<&'a [Term; 3]>,
-    ) -> bool
-    where
-        F: FnMut(&[(usize, &Term)]) -> bool,
-    {
-        match triples1 {
-            [triple1, rest @ ..] => {
-                if is_builtin(&triple1[1]) {
-                    todo!("handle builtin")
-                }
-                if is_open(&triple1[1]) {
-                    for triple2 in triples2 {
-                        let cp = self.checkpoint();
-                        if self.unify_triple_with(triple1, triple2) {
-                            let cont =
-                                self.unify_triples_rec(rest, triples2, callback, cp, deferred);
-                            if !cont {
-                                break;
-                            }
-                        }
-                        self.rollback(cp);
-                    }
-                }
-                true
-            }
-            [] => {
-                if !deferred.is_empty() {
-                    let new_cp = self.checkpoint();
-                    if new_cp != checkpoint {
-                        // some progress has been made since last "defer loop", try again
-                        let mut new_deferred = vec![];
-                        self.unify_triples_rec(
-                            deferred,
-                            triples2,
-                            callback,
-                            new_cp,
-                            &mut new_deferred,
-                        )
-                    } else {
-                        false // give up
-                    }
-                } else {
-                    callback(&self.bindings)
-                }
-            }
-        }
-    }
-
-    /// Tries to unify t1 wih t2 in this context,
-    /// updating them if necessary.
-    ///
-    /// May result to Ok(true), Ok(false), or Err(()) in case the unification must be deferred.
-    pub fn unify_triple_with(&mut self, tr1: &'a [Term; 3], tr2: &'a [Term; 3]) -> bool {
-        let cp = self.checkpoint();
-        for (t1, t2) in tr1.iter().zip(tr2.iter()) {
-            if !self.unify_term_with(t1, t2) {
-                self.rollback(cp);
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Tries to unify t1 wih t2 in this context,
-    /// updating it if necessary.
-    pub fn unify_term_with(&mut self, t1: &'a Term, t2: &'a Term) -> bool {
+    let (l1, l2, start) = stack.pop().unwrap();
+    debug_assert_eq!(l1.len(), l2.len());
+    for i in start..l1.len() {
+        let (t1, t2) = (&l1[i], &l2[i]);
         match (t1, t2) {
-            (Term::Iri(iri1), Term::Iri(iri2)) => iri1 == iri2,
-            (Term::Literal(lit1), Term::Literal(lit2)) => lit1 == lit2,
-            (Term::Variable(vid1), _) => {
-                if let Some(t1) = self.get_binding(*vid1) {
-                    t1 == t2
-                } else if !self.can_bind(*vid1) {
-                    t1 == t2
-                } else {
-                    self.bindings.push((*vid1, t2));
-                    true
-                }
-            }
-            (Term::List(lst1), Term::List(lst2)) => {
-                if lst1.len() != lst2.len() {
-                    return false;
-                }
-                let cp = self.checkpoint();
-                for (t1, t2) in lst1.iter().zip(lst2.iter()) {
-                    if !self.unify_term_with(t1, t2) {
-                        self.rollback(cp);
-                        return false;
+            (Iri(iri1), Iri(iri2)) if iri1 == iri2 => (),
+            (Literal(lit1), Literal(lit2)) if lit1 == lit2 => (),
+            (_, Variable(vid)) if kb_universal(vid) => (),
+            (Variable(vid), _) => {
+                if let Some(tb) = bindings.get(vid.as_str()) {
+                    if tb != t2 {
+                        return Failed;
                     }
+                } else if bindable(vid) {
+                    bindings.set(vid.as_str(), t2);
+                } else if t1 != t2 {
+                    return Failed;
                 }
-                true
             }
-            (Term::Formula(f1), Term::Formula(f2)) => {
-                if f1.for_some().len() != f2.for_some().len() {
-                    return false;
+            (List(lst1), List(lst2)) if lst1.len() == lst2.len() => {
+                stack.push((l1, l2, i));
+                stack.push((lst1, lst2, 0));
+                let r = unify(stack, bindable, kb_universal, bindings);
+                if r != Total {
+                    return r;
+                } else {
+                    // restore context where it was, in order to continue.
+                    // (lst1, lst2, 0) were popped by the recursive call,
+                    // but we still need to pop (again) (l1, l2, i)
+                    stack.pop();
                 }
-                if f1.for_all().len() != f2.for_all().len() {
-                    return false;
-                }
-                todo!("unifying sub-formulae") // for all possible injection (using utils::injections) for existentials and universals in f1 and f2, check if every triple of f1 matches one triple of f2, and if all triples of f2 are matched
             }
-            _ => false,
+            (Formula(f1), Formula(f2)) => {
+                stack.push((l1, l2, i));
+                return Partial;
+            }
+            _ => return Failed,
         }
     }
+    Total
+}
 
-    fn can_bind(&self, vid: usize) -> bool {
-        self.bindable.iter().any(|i| *i == vid)
-    }
+pub type UnificationFrame<'a> = (&'a [Term], &'a [Term], usize);
 
-    fn get_binding(&self, vid: usize) -> Option<&'a Term> {
-        self.bindings
-            .iter()
-            .find_map(|(i, t)| (*i == vid).then(|| *t))
-    }
-
-    fn checkpoint(&self) -> usize {
-        self.bindings.len()
-    }
-
-    fn rollback(&mut self, checkpoint: usize) {
-        self.bindings.truncate(checkpoint)
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UnificationResult {
+    Failed,
+    Partial,
+    Total,
 }
 
 #[cfg(test)]
 #[allow(clippy::bool_assert_comparison)]
 mod test {
     use super::*;
+    use formula::test::ezterm;
     use test_case::test_case;
-    use Term::Variable;
+    use UnificationResult::*;
 
-    #[test_case(":a", ":a" => true)]
-    #[test_case(":a", ":b" => false)]
-    #[test_case(":a", "42" => false)]
-    #[test_case("42", ":a" => false)]
-    #[test_case("?0", ":a" => true)]
-    #[test_case("?0", "42" => true)]
-    #[test_case(":a", "?0" => false)]
-    #[test_case("?0", "?10" => true)]
-    #[test_case("?1", "?10" => false)]
-    #[test_case("?0", "{ :a :b :c }" => true)]
-    #[test_case("?0", "(:a :b)" => true)]
-    #[test_case("(:a :b)", "(:a :b)" => true)]
-    #[test_case("(:a :b)", "(:a :b :c)" => false)]
-    #[test_case("(?0 :b)", "(:a :b)" => true)]
-    #[test_case("(?0 ?2)", "(:a :b)" => true)]
-    #[test_case("(?0 ?0)", "(:a :b)" => false)]
-    #[test_case("(?0 ?0)", "(:a :a)" => true)]
-    fn unify_term_with(t1: &str, t2: &str) -> bool {
-        Context::new(vec![0, 2, 4, 6], vec![]).unify_term_with(&ezterm(t1), &ezterm(t2))
+    #[test_case(":a", ":a" => (Total, 0))]
+    #[test_case(":a", ":b" => (Failed, 0))]
+    #[test_case(":a", "42" => (Failed, 0))]
+    #[test_case("42", ":a" => (Failed, 0))]
+    #[test_case("?0", ":a" => (Total, 1))]
+    #[test_case("?0", "42" => (Total, 1))]
+    #[test_case(":a", "?10" => (Total, 0))]
+    #[test_case("?0", "?10" => (Total, 0))]
+    #[test_case("?0", "{ :s :p :o }" => (Total, 1))]
+    #[test_case("?0", "(:a :b)" => (Total, 1))]
+    #[test_case("(:a :b)", "(:a :b)" => (Total, 0))]
+    #[test_case("(:a :b)", "(:a :b :c)" => (Failed, 0))]
+    #[test_case("(?0 :b)", "(:a :b)" => (Total, 1))]
+    #[test_case("(?0 ?1)", "(:a :b)" => (Total, 2))]
+    #[test_case("(?0 ?1)", "(:a :a)" => (Total, 2))]
+    #[test_case("(?0 ?0)", "(:a :b)" => (Failed, 1))]
+    #[test_case("(?0 ?0)", "(:a :a)" => (Total, 1))]
+    #[test_case("(?0 :b)", "?10" => (Total, 0))]
+    #[test_case("(:a (:l) :c)", "(:a (:l) :c)" => (Total, 0))]
+    #[test_case("(:a (:l) :c)", "(:a (:l) :d)" => (Failed, 0))]
+    #[test_case("(?0 (:l) :c)", "(:a (:l) :d)" => (Failed, 1))]
+    #[test_case("(?0 ?1 :c)", "(:a (:l) :c)" => (Total, 2))]
+    #[test_case("(?1 (?0) :c)", "(:a (:l) :c)" => (Total, 2))]
+    #[test_case("(?1 (?0) :c)", "(:a ((:m)) :c)" => (Total, 2))]
+    #[test_case("(?0 ((?1)) :c)", "(:a ((:m)) :c)" => (Total, 2))]
+    #[test_case("{:s :p :o}", "{:s :p :o}" => (Partial, 0))]
+    #[test_case("(?0 {})", "(:a {})" => (Partial, 1))]
+    fn unify_simple(t1: &str, t2: &str) -> (UnificationResult, usize) {
+        let l1 = vec![ezterm(t1)];
+        let l2 = vec![ezterm(t2)];
+        let mut stack = vec![(&l1[..], &l2[..], 0)];
+        let mut b = Bindings::new();
+        let r = unify(&mut stack, &|_| true, &|_| true, &mut b);
+        (r, b.map.len())
     }
 
-    #[test_case(":a :b :d", ":a :b :c" => sol(&[]); "different 1")]
-    #[test_case(":a :b :c", ":a :b :c" => sol(&[ &[] ]); "identical 1")]
-    #[test_case("?x :b :c", ":a :b :c" => sol(&[ &[(0, ":a")] ]); "1 simple match")]
-    #[test_case(":a :b :c", ":a :b :c , :d" => sol(&[ &[] ]); "contained 1st")]
-    #[test_case(":a :b :d", ":a :b :c , :d" => sol(&[ &[] ]); "contained 2nd")]
-    #[test_case(":a :b ?x", ":a :b :c , :d" => sol(&[ &[(0, ":c")], &[(0, ":d")] ]); "2 simple matches")]
-    #[test_case(":a :b ?x . ?y :b :d", ":a :b :c , :d" => sol(&[ &[(0, ":c"), (1, ":a")], &[(0, ":d"), (1, ":a")] ]); "2 double matches")]
-    #[test_case("?x :b :c , :d", ":a :b :c , :d" => sol(&[ &[(0, ":a")] ]); "compatible co-occurence")]
-    #[test_case("?x :b :c . :a :b ?x", ":a :b :c , :d" => sol(&[]); "incompatible co-occurence")]
-    fn unify_triples_with(src1: &str, src2: &str) -> Vec<Vec<(usize, Term)>> {
-        let mut bindings = vec![];
-        let f1 = parse(src1, ParseConfig::new()).unwrap();
-        let f2 = parse(src2, ParseConfig::new().with_variable_offset(10)).unwrap();
-        let mut ctx = Context::new((0..10).collect(), vec![]);
-        ctx.unify_triples_with(f1.triples(), f2.triples(), &mut |b| {
-            bindings.push(b.iter().map(|(id, t)| (*id, (*t).clone())).collect());
-            true
-        });
-        bindings
-    }
-
-    #[test_case("{ :a :b :c } :vs { :a :b :d } " => sol(&[]); "different 1")]
-    #[test_case("{ :a :b :c } :vs { :a :b :c }" => sol(&[ &[] ]); "identical 1")]
-    #[test_case("{ ?x :b :c } :vs { :a :b :c }" => sol(&[ &[(0, ":a")] ]); "1 simple match")]
-    #[test_case("{ :a :b :c } :vs { :a :b :c, :d }" => sol(&[ &[] ]); "contained 1st")]
-    #[test_case("{ :a :b :d } :vs { :a :b :c, :d }" => sol(&[ &[] ]); "contained 2nd")]
-    #[test_case("{ :a :b ?x } :vs { :a :b :c, :d }" => sol(&[ &[(0, ":c")], &[(0, ":d")] ]); "2 simple matches")]
-    #[test_case("{ :a :b ?x . ?y :b :d } :vs { :a :b :c, :d }" => sol(&[ &[(0, ":c"), (1, ":a")], &[(0, ":d"), (1, ":a")] ]); "2 double matches")]
-    #[test_case("{ ?x :b :c, :d } :vs { :a :b :c, :d }" => sol(&[ &[(0, ":a")] ]); "compatible co-occurence")]
-    #[test_case("{ ?x :b :c. :a :b ?x } :vs { :a :b :c, :d }" => sol(&[]); "incompatible co-occurence")]
-    #[test_case("{ @forAll :x. :x a :Person } :vs { @forAll :y. :y a :Person }" => sol(&[ &[ (0, "?1")] ]); "one local universal")]
-    // not implemented yet   #[test_case("{ @forAll :x , :y . :x :likes :y } :vs { @forAll :y , :x . :x :likes :y }" => sol(&[ &[ (0, "?3"), (1, "?2")] ]); "two local universals")]
-    fn unify_with(src: &str) -> Vec<Vec<(usize, Term)>> {
-        let f = parse(src, Default::default()).unwrap();
-        if let [Term::Formula(f1), _, Term::Formula(f2)] = &f.triples()[0] {
-            let mut bindings = vec![];
-            super::unify_with(f1, f2, Some(&f), |b| {
-                bindings.push(b.iter().map(|(id, t)| (*id, (*t).clone())).collect());
-                true
-            });
-            bindings
-        } else {
-            panic!("Test data has wrong format")
+    #[test_case("?0", ":a", vec![":a"])]
+    #[test_case("?0", "42", vec!["42"])]
+    #[test_case("?0", "{ :s :p :o }", vec!["{ :s :p :o }"])]
+    #[test_case("?0", "(:a :b)", vec!["(:a :b)"])]
+    #[test_case("(?1 ?0)", "(:a :b)", vec![":b", ":a"])]
+    #[test_case("(?1 ?0)", "(:a :a)", vec![":a", ":a"])]
+    #[test_case("(?0 ?0)", "(:a :a)", vec![":a"])]
+    #[test_case("(?0 ?1)", "(:a (:l))", vec![":a", "(:l)"])]
+    #[test_case("(?1 (?0))", "(:a (:l))", vec![":l", ":a"])]
+    #[test_case("(?0 ?1)", "(:a ((:m)))", vec![":a", "((:m))"])]
+    #[test_case("(?1 ((?0)))", "(:a ((:m)))", vec![":m", ":a"])]
+    #[test_case("(?0 ?1 {})", "(:b :a {})", vec![":b", ":a"])]
+    #[test_case("(?0 {})", "(:b {})", vec![":b"])]
+    #[test_case("(?0 :a ({}))", "(:b :a ({}))", vec![":b"])]
+    fn unify_bindings(t1: &str, t2: &str, map: Vec<&str>) {
+        let l1 = vec![ezterm(t1)];
+        let l2 = vec![ezterm(t2)];
+        let mut stack = vec![(&l1[..], &l2[..], 0)];
+        let mut b = Bindings::new();
+        let r = unify(&mut stack, &|_| true, &|_| true, &mut b);
+        assert!(r != Failed);
+        assert_eq!(map.len(), b.map.len());
+        for (i, val) in map.iter().enumerate() {
+            let key = format!("{}", i);
+            assert_eq!(b.get(&key), Some(ezterm(val)).as_ref());
         }
-    }
-
-    fn ezterm(txt: &str) -> Term {
-        match txt.as_bytes() {
-            [b':', ..] => {
-                let mut iri = DEFAULT_BASE.to_string();
-                iri.push_str(&txt[1..]);
-                Iri::new_unchecked(iri).into()
-            }
-            [b'?', ..] => Variable(txt[1..].parse::<usize>().unwrap()),
-            [b'{', .., b'}'] => parse(&txt[1..txt.len() - 1], Default::default())
-                .unwrap()
-                .into(),
-            [b'(', .., b')'] => Term::List(
-                txt[1..txt.len() - 1]
-                    .trim()
-                    .split(' ')
-                    .map(ezterm)
-                    .collect(),
-            ),
-            [c, ..] if b"0123456789+-".contains(c) => {
-                if txt.contains('.') || txt.contains('e') {
-                    Term::Literal(txt.parse::<f64>().unwrap().into())
-                } else {
-                    Term::Literal(txt.parse::<isize>().unwrap().into())
-                }
-            }
-            _ => panic!("unrecognized EZTerm {:?}", txt),
-        }
-    }
-
-    fn sol(slice: &[&[(usize, &str)]]) -> Vec<Vec<(usize, Term)>> {
-        slice
-            .iter()
-            .map(|subslice| {
-                subslice
-                    .iter()
-                    .map(|(id, ezt)| (*id, ezterm(ezt)))
-                    .collect()
-            })
-            .collect()
     }
 }

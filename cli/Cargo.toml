@@ -12,4 +12,4 @@ license = "CECILL-B"
 
 [dependencies]
 namur = { version="0.1.0", path="../lib" }
-clap = "2.33.3"
+clap = "3.0.8"

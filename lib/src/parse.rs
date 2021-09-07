@@ -3,7 +3,6 @@ use super::*;
 use sophia_api::prefix::{Prefix, PrefixBox};
 use sophia_iri::error::InvalidIri;
 use sophia_iri::resolve::{IriParsed, Resolve};
-use std::collections::HashSet;
 use std::fmt;
 
 pub const DEFAULT_BASE: &str = "http://example.org/";
@@ -22,7 +21,6 @@ pub fn parse(txt: &str, config: ParseConfig) -> ParseResult<Formula> {
 pub struct ParseConfig {
     pub base: Option<Iri>,
     pub prefixes: Vec<(PrefixBox, Iri)>,
-    pub variable_offset: usize,
 }
 
 impl ParseConfig {
@@ -34,11 +32,6 @@ impl ParseConfig {
         self.base = Some(iri);
         self
     }
-
-    pub fn with_variable_offset(mut self, offset: usize) -> Self {
-        self.variable_offset = offset;
-        self
-    }
 }
 
 struct Parser<'a> {
@@ -48,8 +41,6 @@ struct Parser<'a> {
     line: usize,
     column: usize,
     drafts: Vec<FormulaDraft>,
-    next_var: usize,
-    var_labels: HashSet<VarLabel>,
     term_stack: Vec<(Term, bool)>,
 }
 
@@ -66,7 +57,6 @@ impl<'a> Parser<'a> {
                 Iri::new_unchecked(parsed_base.resolve("").unwrap().to_string()),
             ))
         }
-        let next_var = config.variable_offset;
         Parser {
             txt,
             config,
@@ -74,8 +64,6 @@ impl<'a> Parser<'a> {
             line: 1,
             column: 0,
             drafts: vec![],
-            next_var,
-            var_labels: HashSet::new(),
             term_stack: vec![],
         }
     }
@@ -118,24 +106,24 @@ impl<'a> Parser<'a> {
                 // TODO if label is an IRI, check if it was used previously in this formula,
                 // and do something (either complain or replace the Term::Iri with Term::Variable in existing triples)
                 self.ws();
-                let label = self.parse_var_label("_:")?;
-                self.push_existential(label);
+                let var = self.parse_var_label("?")?;
+                self.push_existential(var);
                 self.ws();
                 while self.try_consume(|c| c == ',') {
                     self.ws();
-                    let label = self.parse_var_label("_:")?;
-                    self.push_existential(label);
+                    let var = self.parse_var_label("?")?;
+                    self.push_existential(var);
                     self.ws();
                 }
             } else if self.try_consume_str("forAll") {
                 self.ws();
-                let label = self.parse_var_label("?")?;
-                self.push_universal(label);
+                let var = self.parse_var_label("?")?;
+                self.push_universal(var);
                 self.ws();
                 while self.try_consume(|c| c == ',') {
                     self.ws();
-                    let label = self.parse_var_label("?")?;
-                    self.push_universal(label);
+                    let var = self.parse_var_label("?")?;
+                    self.push_universal(var);
                     self.ws();
                 }
             } else {
@@ -285,18 +273,19 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_var_label(&mut self, prefix: &str) -> ParseResult<VarLabel> {
+    fn parse_var_label(&mut self, prefix: &str) -> ParseResult<Variable> {
         if self.try_consume_str(prefix) {
             let label = self.parse_suffix();
-            LocalId::new(label)
-                .map_err(|e| self.err(e))
-                .map(VarLabel::from)
+            Variable::new(label).map_err(|e| self.err(e))
         } else {
+            Err(self.err("I do not support IRIs as variables for the moment"))
+            /*
             match self.txt.as_bytes() {
                 [b'<', ..] => self.parse_iri(),
                 _ => self.parse_pname(),
             }
             .map(VarLabel::from)
+            */
         }
     }
 
@@ -458,112 +447,51 @@ impl<'a> Parser<'a> {
             .map(|res| Iri::new_unchecked(res.to_string()))
     }
 
-    fn push_existential(&mut self, label: VarLabel) -> usize {
-        // TODO detect if the same label is used in the same scope?
-        let id = self.next_var;
-        self.next_var += 1;
-        self.drafts
-            .last_mut()
-            .unwrap()
-            .for_some
-            .push((id, label.clone()));
-        self.var_labels.insert(label);
-        id
+    fn push_existential(&mut self, var: Variable) {
+        self.drafts.last_mut().unwrap().for_some.push(var);
     }
 
-    fn push_universal(&mut self, label: VarLabel) -> usize {
-        // TODO detect if the same label is used in the same scope?
-        let id = self.next_var;
-        self.next_var += 1;
-        self.drafts
-            .last_mut()
-            .unwrap()
-            .for_all
-            .push((id, label.clone()));
-        self.var_labels.insert(label);
-        id
+    fn push_universal(&mut self, var: Variable) {
+        self.drafts.last_mut().unwrap().for_all.push(var);
     }
 
-    fn push_top_universal(&mut self, label: VarLabel) -> usize {
-        // TODO detect if the same label is used in the same scope?
-        let id = self.next_var;
-        self.next_var += 1;
-        self.drafts
-            .first_mut()
-            .unwrap()
-            .for_all
-            .push((id, label.clone()));
-        self.var_labels.insert(label);
-        id
+    fn push_top_universal(&mut self, var: Variable) {
+        self.drafts.first_mut().unwrap().for_all.push(var);
+    }
+
+    fn in_scope(&self, var: &Variable) -> bool {
+        self.drafts.iter().any(|d| d.is_scope_of(var))
     }
 
     /// Return the appropriate Term for an IRI;
     /// could be an IRI or a Variable (if that IRI is used with a quantifier)
     fn iri_to_term(&self, iri: Iri) -> Term {
-        let label1 = iri.into();
-        if self.var_labels.contains(&label1) {
-            // this IRI is quantified somewhere;
-            // let's check that it is still in scope
-            // (could be a previously closed subformula)
-            for draft in self.drafts.iter().rev() {
-                for (id, label2) in &draft.for_all {
-                    if &label1 == label2 {
-                        return Term::Variable(*id);
-                    }
-                }
-                for (id, label2) in &draft.for_some {
-                    if &label1 == label2 {
-                        return Term::Variable(*id);
-                    }
-                }
-            }
-        }
-        match label1 {
-            VarLabel::Iri(iri) => iri.into(),
-            _ => unreachable!(),
-        }
+        Term::Iri(iri)
+        // NB: currently, we do not support IRIs used as variables
     }
 
     /// Return the appropriate Term for a quick var;
     /// either it is already quantified in the current scope,
     /// or a top-level quantifier is added
     fn quickvar_to_term(&mut self, name: LocalId) -> Term {
-        let label1 = name.into();
-        if self.var_labels.contains(&label1) {
-            // this quick var is quantified somewhere;
-            // let's check that it is still in scope
-            // (could be a previously closed subformula)
-            for draft in self.drafts.iter().rev() {
-                for (id, label2) in &draft.for_all {
-                    if &label1 == label2 {
-                        return Term::Variable(*id);
-                    }
-                }
-            }
+        #[allow(clippy::useless_conversion)] // TODO remove this eventually
+        let var = Variable::from(name);
+        if !self.in_scope(&var) {
+            self.push_top_universal(var.clone());
         }
-        let id = self.push_top_universal(label1);
-        Term::Variable(id)
+        var.into()
     }
 
     /// Return the appropriate Term for a blank node;
     /// either it is already quantified in the current scope,
     /// or a new local quantifier is added
     fn bnode_to_term(&mut self, name: LocalId) -> Term {
-        let label1 = name.into();
-        if self.var_labels.contains(&label1) {
-            // this blank node is quantified somewhere;
-            // let's check that it is still in scope
-            // (could be a previously closed subformula)
-            for draft in self.drafts.iter().rev() {
-                for (id, label2) in &draft.for_some {
-                    if &label1 == label2 {
-                        return Term::Variable(*id);
-                    }
-                }
-            }
+        #[allow(clippy::useless_conversion)] // TODO remove this eventually
+        let var = Variable::from(name);
+        if !self.in_scope(&var) {
+            self.push_existential(var.clone());
         }
-        let id = self.push_existential(label1);
-        Term::Variable(id)
+        var.into()
     }
 
     fn push_triple(&mut self, s: Term, p: Term, o: Term, reverse: bool) {
@@ -584,14 +512,20 @@ fn suffix_char(c: u8) -> bool {
 
 #[derive(Clone, Debug, Default)]
 pub struct FormulaDraft {
-    for_some: Vec<(usize, VarLabel)>,
-    for_all: Vec<(usize, VarLabel)>,
+    for_some: Vec<Variable>,
+    for_all: Vec<Variable>,
     triples: Vec<[Term; 3]>,
+}
+
+impl FormulaDraft {
+    fn is_scope_of(&self, var: &Variable) -> bool {
+        self.for_all.iter().any(|v| v == var) || self.for_some.iter().any(|v| v == var)
+    }
 }
 
 impl From<FormulaDraft> for Formula {
     fn from(other: FormulaDraft) -> Formula {
-        Formula::new(other.for_some, other.for_all, other.triples)
+        Formula::new(other.for_all, other.for_some, other.triples)
     }
 }
 
@@ -634,11 +568,11 @@ mod test {
             PREFIX a: <>
             @prefix b: <../b/>.
 
-            @forSome :ppl1, :ppl2.
+            @forSome ?ppl1, ?ppl2.
 
             a:alice a b:Person, b:Woman;
               # an intermediate comment
-              b:likes (a:bob.: :ppl1 :ppl2 true) ;
+              b:likes (a:bob.: ?ppl1 ?ppl2 true) ;
               is b:mother of a:bob.
             # a:this_triple a:will_be a:ignore.
             
@@ -646,6 +580,14 @@ mod test {
         ",
             Default::default(),
         )?;
+        assert_eq!(f.for_all(), &[LocalId::new_unchecked("x")]);
+        assert_eq!(
+            f.for_some(),
+            &[
+                LocalId::new_unchecked("ppl1"),
+                LocalId::new_unchecked("ppl2")
+            ]
+        );
         let triples = f.triples();
         assert_eq!(triples.len(), 5);
         assert_eq!(triples[0][0], Iri::new("http://my.example/a/alice")?.into());
@@ -672,8 +614,8 @@ mod test {
             &triples[2][2],
             &vec![
                 Iri::new("http://my.example/a/bob.:")?.into(),
-                Term::Variable(0),
-                Term::Variable(1),
+                Variable::new("ppl1")?.into(),
+                Variable::new("ppl2")?.into(),
                 Literal::Boolean(true).into(),
                 //Literal::Boolean(false).into(),
             ]

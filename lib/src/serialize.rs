@@ -22,7 +22,6 @@ pub struct SerializeConfig<W> {
     prefixes: Vec<(PrefixBox, super::Iri)>,
     initial_indent: String,
     indent: String,
-    aliases: Vec<(usize, String)>,
     strict: bool,
     depth: usize,
 }
@@ -51,7 +50,6 @@ impl<W: io::Write> SerializeConfig<W> {
             ],
             initial_indent: "".to_string(),
             indent: "    ".to_string(),
-            aliases: vec![],
             strict: false,
             depth: 0,
         }
@@ -102,42 +100,31 @@ impl<W: io::Write> SerializeConfig<W> {
     }
 
     fn serialize_formula(&mut self, f: &Formula) -> io::Result<()> {
-        let old_alias_len = self.aliases.len();
         self.depth += 1;
 
         let mut first = true;
-        for (vid, label) in f.for_some() {
-            let implicit = false; // TODO manage implicit existentials
-            let alias = self.make_alias("_:", *vid, label, implicit);
+        for var in f.for_all() {
             if first {
-                write!(
-                    &mut self.write,
-                    "{}@forSome {}",
-                    self.initial_indent, &alias
-                )?;
+                write!(&mut self.write, "{}", self.initial_indent)?;
+                write!(&mut self.write, "@forAll ?{}", var.as_str())?;
                 first = false;
             } else {
-                write!(&mut self.write, ", {}", &alias)?;
+                write!(&mut self.write, ", ?{}", var.as_str())?;
             }
-            self.aliases.push((*vid, alias));
         }
         if !first {
             writeln!(&mut self.write, ".")?;
         }
 
-        first = true;
-        for (vid, label) in f.for_all() {
-            let implicit = matches!(label, VarLabel::LocalId(_)) && self.depth == 1;
-            let alias = self.make_alias("?", *vid, label, implicit);
-            if !implicit {
-                if first {
-                    write!(&mut self.write, "{}@forAll {}", self.initial_indent, &alias)?;
-                    first = false;
-                } else {
-                    write!(&mut self.write, ", {}", &alias)?;
-                }
+        let mut first = true;
+        for var in f.for_some() {
+            if first {
+                write!(&mut self.write, "{}", self.initial_indent)?;
+                write!(&mut self.write, "@forSome ?{}", var.as_str())?;
+                first = false;
+            } else {
+                write!(&mut self.write, ", ?{}", var.as_str())?;
             }
-            self.aliases.push((*vid, alias));
         }
         if !first {
             writeln!(&mut self.write, ".")?;
@@ -157,7 +144,6 @@ impl<W: io::Write> SerializeConfig<W> {
             self.serialize_term(&t[2])?;
             writeln!(&mut self.write, ".")?;
         }
-        self.aliases.truncate(old_alias_len);
         self.depth -= 1;
         Ok(())
     }
@@ -182,7 +168,7 @@ impl<W: io::Write> SerializeConfig<W> {
                 // TODO properly serialize string, escaping characters the N3 way
                 write!(w, "{:?}^^<{}>", val, &dt[..])
             }
-            Variable(vid) => self.write_alias(*vid),
+            Variable(var) => write!(w, "?{}", var.as_str()),
             List(terms) => {
                 writeln!(&mut self.write, "( ")?;
                 self.inc_indent();
@@ -211,21 +197,6 @@ impl<W: io::Write> SerializeConfig<W> {
         do_serialize_iri(write, iri, &prefixes[..])
     }
 
-    fn make_alias(&self, prefix: &str, vid: usize, label: &VarLabel, implicit: bool) -> String {
-        match label {
-            VarLabel::None => format!("{}v{}", prefix, vid),
-            VarLabel::LocalId(id) => {
-                if implicit || !self.strict {
-                    format!("{}{}", prefix, &id[..])
-                } else {
-                    let var_iri = Iri::from_simple_iri(variable_iri(id));
-                    stringify_iri(&var_iri, &self.prefixes[..])
-                }
-            }
-            VarLabel::Iri(iri) => stringify_iri(iri, &self.prefixes[..]),
-        }
-    }
-
     fn inc_indent(&mut self) {
         self.initial_indent.push_str(&self.indent);
     }
@@ -234,27 +205,12 @@ impl<W: io::Write> SerializeConfig<W> {
         self.initial_indent
             .truncate(self.initial_indent.len() - self.indent.len());
     }
-
-    /// Write to self.write the alias of variable v.
-    fn write_alias(&mut self, v: usize) -> io::Result<()> {
-        let Self { write, aliases, .. } = self;
-        match aliases.iter().find(|(i, _)| *i == v) {
-            Some((_, alias)) => write!(write, "{}", alias),
-            None => write!(write, "?_free_{}", v),
-        }
-    }
 }
 
 impl Default for SerializeConfig<io::Stdout> {
     fn default() -> SerializeConfig<io::Stdout> {
         SerializeConfig::new(io::stdout())
     }
-}
-
-fn stringify_iri<P: PrefixMap + ?Sized>(iri: &Iri, prefixes: &P) -> String {
-    let mut buf = vec![];
-    do_serialize_iri(&mut buf, iri, prefixes).unwrap();
-    unsafe { String::from_utf8_unchecked(buf) }
 }
 
 fn do_serialize_iri<W: io::Write, P: PrefixMap + ?Sized>(

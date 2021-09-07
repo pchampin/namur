@@ -59,6 +59,10 @@ impl LocalId {
     pub fn new_unchecked<T: Into<Arc<str>>>(id: T) -> LocalId {
         LocalId(id.into())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::ops::Deref for LocalId {

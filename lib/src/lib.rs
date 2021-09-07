@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-mod bind;
-pub use bind::*;
+mod backtracker;
+pub use backtracker::*;
 mod builtins;
 pub use builtins::*;
-mod iri;
-pub use iri::*;
 mod formula;
 pub use formula::*;
+mod iri;
+pub use iri::*;
 mod language_tag;
 pub use language_tag::*;
 mod literal;
@@ -24,6 +24,7 @@ mod term;
 pub use term::*;
 mod unify;
 pub use unify::*;
-mod utils;
+mod variable;
+pub use variable::*;
 
 pub mod ns;
