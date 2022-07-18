@@ -86,7 +86,7 @@ impl<'a> TripleMatcher<'a> {
                 self.j += 1;
                 Some(Tree::Leaf(Arc::clone(&self.b)))
             }
-        } else  if self.j == self.kb.triples().len() {
+        } else if self.j == self.kb.triples().len() {
             self.i += 1;
             self.next()
         } else {
@@ -214,11 +214,11 @@ impl<'a> TermUnifier<'a> {
         }
     }
 
-    fn kb_universal(&self, vid: &LocalId) -> bool {
+    fn kb_universal(&self, vid: &Variable) -> bool {
         self.kb.for_all().iter().any(|i| i == vid)
     }
 
-    fn can_bind(&self, vid: &LocalId) -> bool {
+    fn can_bind(&self, vid: &Variable) -> bool {
         self.kb
             .for_all()
             .iter()

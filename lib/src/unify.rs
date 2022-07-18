@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, Default)]
 pub struct Bindings<'a> {
     parent: Option<Arc<Bindings<'a>>>,
-    map: HashMap<&'a str, &'a Term>,
+    map: HashMap<&'a Variable, &'a Term>,
 }
 
 impl<'a> Bindings<'a> {
@@ -25,14 +25,14 @@ impl<'a> Bindings<'a> {
         }
     }
 
-    pub fn get(&self, variable: &str) -> Option<&Term> {
+    pub fn get(&self, variable: &Variable) -> Option<&Term> {
         self.map
             .get(variable)
             .copied()
             .or_else(|| self.parent.as_ref().and_then(|p| p.get(variable)))
     }
 
-    pub fn set(&mut self, variable: &'a str, term: &'a Term) {
+    pub fn set(&mut self, variable: &'a Variable, term: &'a Term) {
         self.map.insert(variable, term);
     }
 
@@ -53,7 +53,7 @@ impl<'a> Bindings<'a> {
     pub fn bind_term(&self, t: &Term) -> Term {
         use Term::*;
         match t {
-            Variable(vid) => match self.get(vid.as_str()) {
+            Variable(vid) => match self.get(vid) {
                 Some(t) => t.clone(),
                 None => Variable(vid.clone()),
             },
@@ -68,15 +68,11 @@ impl<'a> Bindings<'a> {
             None => Bindings::new(),
             Some(p) => p.compile(exclude1, exclude2),
         };
-        for (name, term) in self.map.iter() {
-            if exclude1
-                .iter()
-                .chain(exclude2.iter())
-                .any(|v| v.as_str() == *name)
-            {
+        for (var, term) in self.map.iter() {
+            if exclude1.iter().chain(exclude2.iter()).any(|v| v == *var) {
                 continue;
             }
-            compiled.map.insert(*name, *term);
+            compiled.map.insert(*var, *term);
         }
         compiled
     }
@@ -94,8 +90,8 @@ pub fn unify<'a, F1, F2>(
     bindings: &mut Bindings<'a>,
 ) -> UnificationResult
 where
-    F1: Fn(&LocalId) -> bool,
-    F2: Fn(&LocalId) -> bool,
+    F1: Fn(&Variable) -> bool,
+    F2: Fn(&Variable) -> bool,
 {
     use Term::*;
     use UnificationResult::*;
@@ -109,12 +105,12 @@ where
             (Literal(lit1), Literal(lit2)) if lit1 == lit2 => (),
             (_, Variable(vid)) if kb_universal(vid) => (),
             (Variable(vid), _) => {
-                if let Some(tb) = bindings.get(vid.as_str()) {
+                if let Some(tb) = bindings.get(vid) {
                     if tb != t2 {
                         return Failed;
                     }
                 } else if bindable(vid) {
-                    bindings.set(vid.as_str(), t2);
+                    bindings.set(vid, t2);
                 } else if t1 != t2 {
                     return Failed;
                 }
@@ -218,7 +214,7 @@ mod test {
         assert!(r != Failed);
         assert_eq!(map.len(), b.map.len());
         for (i, val) in map.iter().enumerate() {
-            let key = format!("{}", i);
+            let key = LocalId::new_unchecked(format!("{}", i)).into();
             assert_eq!(b.get(&key), Some(ezterm(val)).as_ref());
         }
     }

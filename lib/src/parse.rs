@@ -276,7 +276,9 @@ impl<'a> Parser<'a> {
     fn parse_var_label(&mut self, prefix: &str) -> ParseResult<Variable> {
         if self.try_consume_str(prefix) {
             let label = self.parse_suffix();
-            Variable::new(label).map_err(|e| self.err(e))
+            LocalId::new(label)
+                .map_err(|e| self.err(e))
+                .map(Variable::from)
         } else {
             Err(self.err("I do not support IRIs as variables for the moment"))
             /*
@@ -474,7 +476,6 @@ impl<'a> Parser<'a> {
     /// either it is already quantified in the current scope,
     /// or a top-level quantifier is added
     fn quickvar_to_term(&mut self, name: LocalId) -> Term {
-        #[allow(clippy::useless_conversion)] // TODO remove this eventually
         let var = Variable::from(name);
         if !self.in_scope(&var) {
             self.push_top_universal(var.clone());
@@ -486,7 +487,6 @@ impl<'a> Parser<'a> {
     /// either it is already quantified in the current scope,
     /// or a new local quantifier is added
     fn bnode_to_term(&mut self, name: LocalId) -> Term {
-        #[allow(clippy::useless_conversion)] // TODO remove this eventually
         let var = Variable::from(name);
         if !self.in_scope(&var) {
             self.push_existential(var.clone());
@@ -580,12 +580,12 @@ mod test {
         ",
             Default::default(),
         )?;
-        assert_eq!(f.for_all(), &[LocalId::new_unchecked("x")]);
+        assert_eq!(f.for_all(), &[LocalId::new_unchecked("x").into()]);
         assert_eq!(
             f.for_some(),
             &[
-                LocalId::new_unchecked("ppl1"),
-                LocalId::new_unchecked("ppl2")
+                LocalId::new_unchecked("ppl1").into(),
+                LocalId::new_unchecked("ppl2").into(),
             ]
         );
         let triples = f.triples();
@@ -614,8 +614,8 @@ mod test {
             &triples[2][2],
             &vec![
                 Iri::new("http://my.example/a/bob.:")?.into(),
-                Variable::new("ppl1")?.into(),
-                Variable::new("ppl2")?.into(),
+                LocalId::new("ppl1")?.into(),
+                LocalId::new("ppl2")?.into(),
                 Literal::Boolean(true).into(),
                 //Literal::Boolean(false).into(),
             ]

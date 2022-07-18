@@ -46,6 +46,12 @@ impl From<Formula> for Term {
     }
 }
 
+impl From<LocalId> for Term {
+    fn from(other: LocalId) -> Term {
+        Term::Variable(other.into())
+    }
+}
+
 impl Term {
     pub fn is_atom(&self) -> bool {
         matches!(self, Term::Iri(_) | Term::Literal(_))

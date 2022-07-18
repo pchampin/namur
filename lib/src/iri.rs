@@ -2,7 +2,7 @@ use sophia_api::term::{RawValue, SimpleIri, TTerm, TermKind};
 use sophia_iri::{error::InvalidIri, Iri as SophiaIri, IsIri, IsIriRef};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Iri(Arc<str>);
 
 impl Iri {

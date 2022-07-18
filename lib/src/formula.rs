@@ -141,7 +141,7 @@ pub(crate) mod test {
                 iri.push_str(&txt[1..]);
                 Iri::new_unchecked(iri).into()
             }
-            [b'?', ..] => Variable::new_unchecked(&txt[1..]).into(),
+            [b'?', ..] => LocalId::new_unchecked(&txt[1..]).into(),
             [b'{', .., b'}'] => parse(&txt[1..txt.len() - 1], Default::default())
                 .unwrap()
                 .into(),
