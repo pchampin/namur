@@ -13,7 +13,7 @@ pub fn is_open(t: &Term) -> bool {
 
 /// Closed built-ins can only be used in rule bodies.
 pub fn is_closed_builtin(_t: &Term) -> bool {
-    false // todo implement some cloed built-ins
+    false // todo implement some closed built-ins
 }
 
 /// Open built-ins' theoribox can be manually augmented,

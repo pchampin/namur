@@ -5,9 +5,6 @@
 //! while N3 was originally using SPARQL's grammar for variables,
 //! which is more restrictive than for blank nodes.
 
-//! Blank node like specified in [RDF](https://www.w3.org/TR/rdf11-primer/#section-blank-node).
-//!
-
 use super::*;
 use lazy_static::lazy_static;
 use regex::Regex;

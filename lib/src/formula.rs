@@ -2,11 +2,6 @@ use super::*;
 use std::collections::BTreeSet;
 
 /// An N3 Formula is a set of triples, associated to a set of quantified variables.
-///
-/// # Invariant
-///
-/// * Variable numeric identifiers are never used twice in a given formula
-///   (also considering its subformulae).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Formula {
     for_all: Vec<Variable>,
